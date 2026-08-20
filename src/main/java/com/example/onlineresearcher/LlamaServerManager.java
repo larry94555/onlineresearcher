@@ -7,7 +7,6 @@ import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -63,6 +62,8 @@ public class LlamaServerManager {
             return;
         }
         requireAuthenticatedBind(host, apiKey);
+        String unreachable = clientReachabilityWarning(host, clientHost);
+        if (!unreachable.isEmpty()) log.warn("[llama] {}", unreachable);
         command = buildCommand();
         log.info("[llama] launching: {}", String.join(" ", redactSecrets(command)));
         if (!launch()) {
@@ -87,6 +88,35 @@ public class LlamaServerManager {
         if (isLoopback(host) || (apiKey != null && !apiKey.isBlank())) return;
         throw new IllegalStateException("llama.host=" + host + " exposes llama-server beyond this machine "
                 + "but llama.api-key is not set. Either bind to 127.0.0.1 (the default) or set llama.api-key.");
+    }
+
+    /**
+     * The address llama-server binds and the address the client dials are separate settings, so they can
+     * disagree. A server on {@code ::1} is unreachable from {@code 127.0.0.1}, and the only symptom is a
+     * health check that never succeeds — indistinguishable from a slow model download. Returns the warning
+     * to log, or "" when the two can reach each other.
+     */
+    static String clientReachabilityWarning(String bindHost, String clientHost) {
+        if (isWildcard(bindHost)) return "";   // binds every interface; any local address reaches it
+        boolean mismatched = (isIpv6Literal(bindHost) && isIpv4Literal(clientHost))
+                || (isIpv4Literal(bindHost) && isIpv6Literal(clientHost));
+        if (!mismatched) return "";
+        return "llama.host=" + bindHost + " and llama.client-host=" + clientHost + " are literal addresses "
+                + "of different families, so the health check and every chat request will fail to reach the "
+                + "server. Set llama.client-host=" + bindHost + ".";
+    }
+
+    private static boolean isWildcard(String host) {
+        String h = LlamaEndpoint.authority(host).replace("[", "").replace("]", "");
+        return h.equals("0.0.0.0") || h.equals("::");
+    }
+
+    private static boolean isIpv6Literal(String host) {
+        return LlamaEndpoint.authority(host).startsWith("[");
+    }
+
+    private static boolean isIpv4Literal(String host) {
+        return LlamaEndpoint.authority(host).matches("\\d{1,3}(?:\\.\\d{1,3}){3}");
     }
 
     /**
@@ -210,8 +240,8 @@ public class LlamaServerManager {
 
     private boolean healthy() {
         try {
-            HttpResponse<String> response = http.send(HttpRequest.newBuilder(
-                    URI.create("http://" + clientHost + ":" + port + "/health")).GET().build(),
+            HttpResponse<String> response = http.send(
+                    HttpRequest.newBuilder(LlamaEndpoint.health(clientHost, port)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             return response.statusCode() == 200;
         } catch (Exception e) {

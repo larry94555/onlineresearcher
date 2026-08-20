@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -88,7 +87,7 @@ public class LlamaClient {
      */
     static HttpRequest buildRequest(String host, int port, String apiKey, String json) {
         HttpRequest.Builder request = HttpRequest.newBuilder()
-                .uri(URI.create("http://" + host + ":" + port + "/v1/chat/completions"))
+                .uri(LlamaEndpoint.chatCompletions(host, port))
                 .timeout(Duration.ofMinutes(10))
                 .header("Content-Type", "application/json");
         if (apiKey != null && !apiKey.isBlank()) {

@@ -70,6 +70,21 @@ class LlamaServerManagerTest {
     }
 
     @Test
+    void aClientHostOfTheWrongAddressFamilyIsCalledOut() {
+        // Otherwise the only symptom is a health check that never succeeds, which reads as a slow start.
+        String warning = LlamaServerManager.clientReachabilityWarning("::1", "127.0.0.1");
+        assertTrue(warning.contains("llama.client-host=::1"), warning);
+
+        assertEquals("", LlamaServerManager.clientReachabilityWarning("::1", "::1"));
+        assertEquals("", LlamaServerManager.clientReachabilityWarning("127.0.0.1", "127.0.0.1"));
+        assertEquals("", LlamaServerManager.clientReachabilityWarning("0.0.0.0", "127.0.0.1"),
+                "a wildcard bind is reachable from any local address");
+        assertEquals("", LlamaServerManager.clientReachabilityWarning("::", "127.0.0.1"));
+        assertEquals("", LlamaServerManager.clientReachabilityWarning("localhost", "127.0.0.1"),
+                "a hostname can resolve to either family; do not guess");
+    }
+
+    @Test
     void aKeyPassedThroughExtraArgsIsRedactedFromTheLog() {
         List<String> logged = LlamaServerManager.redactSecrets(
                 List.of("llama-server", "--api-key", "s3cret", "--jinja"));
