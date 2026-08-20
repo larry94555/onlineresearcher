@@ -87,4 +87,16 @@ class ResearchSkillServiceTest {
         assertTrue(d.contains("prefer those authoritative sources"), "should prefer authoritative sources");
         assertTrue(d.contains("against those authoritative sources"), "should check facts against them");
     }
+
+    @Test
+    void defaultInstructionsDoNotTreatAMissedSearchAsAFinding() {
+        String d = ResearchSkillService.DEFAULT_INSTRUCTIONS.toLowerCase();
+        // The guidance is injected into every step, so it must not contradict the prompts: a search that
+        // surfaced no connection leaves the relationship unresolved, it does not disprove one.
+        assertFalse(d.contains("absence of any linking source is itself evidence"),
+                "absence of evidence must not be taught as evidence of absence");
+        assertTrue(d.contains("unresolved"), "an unaddressed relationship should be reported as unresolved");
+        assertTrue(d.contains("only when a source actually says so"),
+                "a negative conclusion needs a source that states it");
+    }
 }

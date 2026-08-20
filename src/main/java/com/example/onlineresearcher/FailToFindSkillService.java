@@ -16,7 +16,7 @@ public class FailToFindSkillService {
     private static final Logger log = LoggerFactory.getLogger(FailToFindSkillService.class);
 
     static final String SKILL_NAME = "failing-to-find-information";
-    static final int SKILL_VERSION = 1;
+    static final int SKILL_VERSION = 2;
     private static final String SKILL_DESCRIPTION =
             "What to do when a first search finds nothing: try agent-accessible sources, then report clearly.";
 
@@ -30,9 +30,10 @@ public class FailToFindSkillService {
             3. ONLY if that second pass also returns nothing usable, state the result clearly and exactly:
                "I was not able to find any information on that topic." Never leave the outcome vague or
                trailing off.
-            4. A real answer is not a failure: a well-supported conclusion — including a negative one (for
-               example, that two things are unrelated) — is an answer. Reserve the not-found statement for
-               when no source actually answers the request.
+            4. A real answer is not a failure: a conclusion the sources support — including a negative one
+               that a source actually states — is an answer. But a search that found nothing is not a negative
+               finding: report it as not found, or as unresolved, never as proof that there is nothing to
+               find. Reserve the not-found statement for when no source actually answers the request.
             5. The result of every query must be clear: the final statement is either the answer to the
                question or the exact not-found sentence above.
             6. After a not-found result, if (and only if) a specific clarification could plausibly improve the

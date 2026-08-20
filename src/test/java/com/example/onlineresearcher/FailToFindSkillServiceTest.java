@@ -29,6 +29,11 @@ class FailToFindSkillServiceTest {
         // The exact not-found sentence the agent must use is embedded in the guidance.
         assertTrue(text.contains(ResearchService.NOT_FOUND_MESSAGE), "exact not-found sentence");
         assertTrue(lower.contains("clarifying question"), "optional clarifying question");
+        // A search that found nothing is a not-found result, never a negative finding. (Line-wrapped in
+        // the guidance, so compare on a single-spaced copy.)
+        String flowed = lower.replaceAll("\\s+", " ");
+        assertTrue(flowed.contains("never as proof that there is nothing to find"),
+                "must not license concluding absence from a failed search");
     }
 
     @Test

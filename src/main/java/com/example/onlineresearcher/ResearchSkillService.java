@@ -25,7 +25,7 @@ public class ResearchSkillService {
             "best practices for doing research on the web and fact checking sources";
 
     /** Bumping this rebuilds any saved skill on next use, so existing installs pick up new strategy. */
-    static final int SKILL_VERSION = 2;
+    static final int SKILL_VERSION = 3;
 
     /** Used when the model is asked to turn raw best-practice snippets into a skill. */
     private static final String SYNTHESIS_SYSTEM = """
@@ -59,9 +59,11 @@ public class ResearchSkillService {
             7. Watch for bias, marketing language, and conflicts of interest; separate fact from opinion.
             8. Flag uncertainty and disagreement between sources instead of papering over it.
             9. Distinguish what the sources actually state from your own inference.
-            10. A negative answer is a real answer: if two subjects are clearly defined and nothing connects
-                them, conclude they are unrelated except superficially (e.g. they only share a name because
-                they are named after the same person). Absence of any linking source is itself evidence.
+            10. Do not turn a failed search into a finding. If no source addresses whether two subjects are
+                related, report the relationship as unresolved — none of the sources searched describes a
+                connection — which is not the same as establishing that none exists. Conclude that two
+                subjects are unrelated, or related only by a shared name, only when a source actually says so
+                (a disambiguation or namesake page does).
             11. Cite the sources you used, with their URLs, so the reader can verify the findings.
             12. If the gathered information is thin or contradictory, refine the queries and search again.
             """;
