@@ -48,6 +48,9 @@ public class ResearchService {
     private boolean awaitingClarification;
     private String pendingTopic;
     private int clarificationCount;
+    // Follow-up questions asked after a not-found result, capped like the up-front clarifications so a
+    // topic that stays unfindable cannot keep asking forever.
+    private int notFoundFollowUps;
 
     public ResearchService(ConversationMemory memory, ChatModel model, WebResearchService webResearch,
                            ResearchSkillService skillService, SportsScoreSkillService sportsSkillService,
@@ -123,6 +126,9 @@ public class ResearchService {
             answer = "Sorry — research failed: " + e.getMessage();
         }
         memory.recordExchange(userInput, answer);
+        if (!answer.startsWith(NOT_FOUND_MESSAGE)) {
+            notFoundFollowUps = 0;   // the topic was answered; the follow-up budget starts over
+        }
         return answer;
     }
 
@@ -242,10 +248,21 @@ public class ResearchService {
         return answer != null && answer.toUpperCase(java.util.Locale.ROOT).contains("NEED_MORE_SOURCES");
     }
 
-    /** Builds the clear not-found result, appending one clarifying question when it could help. */
+    /**
+     * Builds the clear not-found result, appending one clarifying question when it could help.
+     *
+     * <p>Asking the question also re-arms the clarification state, which {@link #handle} cleared before
+     * researching. Without that, the answer the user types next would be read as a brand-new topic, and the
+     * detail this question asked for would never reach the search it was meant to improve.
+     */
     private String notFoundResponse(String topic, String skill) {
+        if (notFoundFollowUps >= maxClarifications) return NOT_FOUND_MESSAGE;
         String question = notFoundClarifyingQuestion(topic, skill);
-        return question.isBlank() ? NOT_FOUND_MESSAGE : NOT_FOUND_MESSAGE + "\n\n" + question;
+        if (question.isBlank()) return NOT_FOUND_MESSAGE;
+        awaitingClarification = true;
+        pendingTopic = topic;
+        notFoundFollowUps++;
+        return NOT_FOUND_MESSAGE + "\n\n" + question;
     }
 
     /**
@@ -500,11 +517,13 @@ public class ResearchService {
                 + "basic, relevant, fact-checked details. Apply this research skill:\n" + skill + "\n\n"
                 + "If the evidence covers the basics from corroborating sources, respond with exactly: "
                 + "SUFFICIENT\n"
-                + "IMPORTANT: if the topic asks whether two things are related, then having a clear, "
-                + "independent definition of EACH thing is already SUFFICIENT — you do not need a source that "
-                + "explicitly states the relationship, because the answer may legitimately be that they are "
-                + "unrelated except by name. Only respond INSUFFICIENT if a basic definition of one of the "
-                + "things is still missing.\n"
+                + "IMPORTANT: if the topic asks whether two things are related, separate definitions of each "
+                + "thing do NOT settle the question. A search that did not surface a relationship is not "
+                + "evidence that no relationship exists. The evidence is SUFFICIENT only when some source "
+                + "actually addresses the relationship — either stating a connection, or stating that the two "
+                + "are distinct (a disambiguation or namesake page does this). If the evidence only defines "
+                + "each thing separately, respond INSUFFICIENT and say that no source addresses whether the "
+                + "two are related.\n"
                 + "Otherwise respond with exactly: INSUFFICIENT: <what is missing>\n"
                 + "Respond with only one line in that format.";
         String user = "Topic:\n" + topic + "\n\nGathered evidence:\n" + evidence;
@@ -534,20 +553,28 @@ public class ResearchService {
                 + "earlier, unrelated topic. If the evidence contains NOTHING that answers the request (for "
                 + "example, a live sports score that none of the sources report), output EXACTLY the single "
                 + "token NEED_MORE_SOURCES and nothing else — do NOT substitute an answer to a different "
-                + "question. (A well-supported conclusion, INCLUDING a negative one such as 'X and Y are "
-                + "unrelated except for a shared name', IS a real answer — do NOT output NEED_MORE_SOURCES in "
-                + "that case.)\n"
+                + "question. (A conclusion the evidence supports, INCLUDING a negative one that a source "
+                + "actually states — such as a disambiguation page saying two things share only a name — IS a "
+                + "real answer; do NOT output NEED_MORE_SOURCES in that case.)\n"
                 + "Lead with the key findings, corroborate facts across sources where possible, note any "
                 + "uncertainty or disagreement, and do not invent specific facts not supported by the "
                 + "evidence. Be concise — a few short paragraphs at most. NEVER reproduce long numeric "
                 + "sequences or raw data dumps; cite at most the first few terms.\n"
-                + "CRITICAL for 'how are X and Y related' questions: if the evidence does not actually define "
-                + "one of the two things, do NOT invent a connection to fill the gap. If the only thing "
-                + "linking X and Y is that they are named after the same person or family, say that "
-                + "explicitly and state that there is otherwise no known mathematical/technical connection. "
-                + "Do not claim they are 'both related to' some third thing unless a source explicitly says "
-                + "so. A well-supported negative answer is a valid, complete answer — do not pad it.\n"
+                + "CRITICAL for 'how are X and Y related' questions: do NOT invent a connection to fill a "
+                + "gap, and do NOT rule one out either. Give the definitions the sources support, then say "
+                + "precisely what the sources do and do not establish about the relationship. If no source "
+                + "addresses a connection, write that none of the sources searched describes one — and that "
+                + "this leaves the question unresolved, NOT that the two are unrelated. Report them as "
+                + "unrelated, or related only by a shared name, ONLY when a source says so. Do not claim they "
+                + "are 'both related to' some third thing unless a source explicitly says so.\n"
                 + "End with a 'Sources' list of the titles and URLs you used.";
+        if (!sufficient) {
+            // The gathering loop gave up short of what it wanted. An unfinished search is exactly where an
+            // unsupported conclusion gets written, so the answer has to show its seams.
+            system += "\nThe evidence was judged INCOMPLETE for this request. Name plainly which "
+                    + "part of the request the sources do not settle, and present nothing beyond them as a "
+                    + "conclusion.";
+        }
         String user = "Current request:\n" + topic + "\n\nGathered web evidence:\n" + evidence;
         // Stateless: the answer must be grounded in THIS request's evidence only. Routing synthesis through
         // conversation memory let the model continue a previous, unrelated topic when the current evidence

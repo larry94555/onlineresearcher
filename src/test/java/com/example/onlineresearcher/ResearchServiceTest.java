@@ -265,6 +265,94 @@ class ResearchServiceTest {
 
         assertTrue(answer.startsWith(ResearchService.NOT_FOUND_MESSAGE), answer);
         assertTrue(answer.contains("Which year are you asking about?"), answer);
+        assertTrue(service.awaitingReply(), "asking a follow-up must leave the agent waiting for the answer");
+    }
+
+    @Test
+    void answerToANotFoundFollowUpContinuesTheSameTopic(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        List<String> promptsSeen = new ArrayList<>();
+        AtomicInteger turns = new AtomicInteger();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            messages.stream().filter(m -> m.role().equals("user"))
+                    .forEach(m -> promptsSeen.add(m.content()));
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "topic";
+            if (system.contains("judge whether the gathered")) return "INSUFFICIENT: missing";
+            if (system.contains("List up to 4 specific web sources")) return "";
+            if (system.contains("found nothing usable")) return "Which year are you asking about?";
+            if (system.contains("careful research assistant")) {
+                // The first turn finds nothing; once the year arrives, the answer comes together.
+                return turns.get() == 1 ? "NEED_MORE_SOURCES" : "ANSWER WITH THE YEAR";
+            }
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        turns.set(1);
+        service.handle("who won the nova cup");
+        assertTrue(service.awaitingReply());
+
+        turns.set(2);
+        promptsSeen.clear();
+        String answer = service.handle("1997");
+
+        assertTrue(answer.contains("ANSWER WITH THE YEAR"), answer);
+        assertFalse(service.awaitingReply());
+        // The second turn researched the original topic plus the detail, not "1997" as a fresh topic.
+        assertTrue(promptsSeen.stream().anyMatch(prompt -> prompt.contains("who won the nova cup")
+                        && prompt.contains("Additional detail from the user: 1997")),
+                "the follow-up answer must be folded into the original topic: " + promptsSeen);
+    }
+
+    @Test
+    void sufficiencyRequiresEvidenceThatAddressesTheRelationship(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        List<String> sufficiencyPrompts = new ArrayList<>();
+        List<String> synthesisPrompts = new ArrayList<>();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "topic";
+            if (system.contains("judge whether the gathered")) {
+                sufficiencyPrompts.add(system);
+                return "INSUFFICIENT: no source addresses whether the two are related";
+            }
+            if (system.contains("careful research assistant")) {
+                synthesisPrompts.add(system);
+                return "ANSWER";
+            }
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        String answer = service.handle("is there a relation between jacobsthal numbers and the jacobsthal function");
+
+        assertTrue(answer.contains("ANSWER"), answer);
+        // Definitions of each thing on their own must not be accepted as settling the relationship.
+        assertTrue(sufficiencyPrompts.stream().anyMatch(prompt ->
+                        prompt.contains("separate definitions of each thing do NOT settle the question")),
+                "sufficiency must not accept two definitions as proof of no relationship");
+        // The search stopped short of what it wanted, so the synthesis prompt has to say so.
+        assertTrue(synthesisPrompts.stream().anyMatch(prompt -> prompt.contains("judged INCOMPLETE")),
+                "an incomplete search must be flagged to the synthesizer");
+        assertTrue(synthesisPrompts.stream().anyMatch(prompt -> prompt.contains("leaves the question unresolved")),
+                "synthesis must report a missing relationship as unresolved, not as no relationship");
     }
 
     @Test
