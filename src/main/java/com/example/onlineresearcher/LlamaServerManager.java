@@ -31,7 +31,7 @@ public class LlamaServerManager {
     @Value("${llama.hf-model:}") private String hfModel = "";
     @Value("${llama.model-path:}") private String modelPath = "";
     @Value("${llama.alias:qwen2.5-3b-instruct}") private String alias = "qwen2.5-3b-instruct";
-    @Value("${llama.host:0.0.0.0}") private String host = "0.0.0.0";
+    @Value("${llama.host:127.0.0.1}") private String host = "127.0.0.1";
     @Value("${llama.port:8081}") private int port = 8081;
     @Value("${llama.client-host:127.0.0.1}") private String clientHost = "127.0.0.1";
     @Value("${llama.ctx-size:0}") private int ctxSize = 0;
@@ -46,6 +46,9 @@ public class LlamaServerManager {
     @Value("${llama.draft-model-path:}") private String draftPath = "";
     @Value("${llama.draft-tokens:16}") private int draftTokens = 16;
     @Value("${llama.draft-gpu-layers:-1}") private int draftGpuLayers = -1;
+    // Passed to llama-server as --api-key. Required before the server may bind to a non-loopback address,
+    // because llama-server's inference API and Web UI are otherwise unauthenticated.
+    @Value("${llama.api-key:}") private String apiKey = "";
 
     private final HttpClient http = HttpClient.newHttpClient();
     private volatile Process proc;
@@ -59,15 +62,39 @@ public class LlamaServerManager {
             log.info("[llama] manage-server=false; expecting an external llama-server on port {}", port);
             return;
         }
+        requireAuthenticatedBind(host, apiKey);
         command = buildCommand();
         log.info("[llama] launching: {}", String.join(" ", command));
-        launch();
+        if (!launch()) {
+            // A launch failure (missing binary, bad path) never becomes healthy: polling for ten minutes
+            // would only hang startup, so report it and leave the server unmanaged.
+            log.error("[llama] server not started; requests to it will fail until the binary is available.");
+            return;
+        }
         waitUntilReady();
         if (healthy()) {
             startWatchdog();
         } else {
             log.warn("[llama] not healthy yet; watchdog NOT started (avoid restart-storm during model download).");
         }
+    }
+
+    /**
+     * llama-server serves its inference API and Web UI without authentication unless an API key is set, so
+     * a non-loopback bind must carry one. Refuses to start rather than exposing the model to the network.
+     */
+    static void requireAuthenticatedBind(String host, String apiKey) {
+        if (isLoopback(host) || (apiKey != null && !apiKey.isBlank())) return;
+        throw new IllegalStateException("llama.host=" + host + " exposes llama-server beyond this machine "
+                + "but llama.api-key is not set. Either bind to 127.0.0.1 (the default) or set llama.api-key.");
+    }
+
+    /** True when the bind address reaches only this machine. Blank means llama-server's own default (loopback). */
+    static boolean isLoopback(String value) {
+        String h = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        if (h.isEmpty()) return true;
+        if (h.startsWith("[") && h.endsWith("]")) h = h.substring(1, h.length() - 1);
+        return h.equals("localhost") || h.equals("::1") || h.equals("0:0:0:0:0:0:0:1") || h.startsWith("127.");
     }
 
     String resolveBinary() {
@@ -97,6 +124,10 @@ public class LlamaServerManager {
         cmd.add("--parallel"); cmd.add(String.valueOf(Math.max(1, parallel)));
         cmd.add("--alias"); cmd.add(alias);
         cmd.add("--jinja");
+        if (!apiKey.isBlank()) {
+            cmd.add("--api-key");
+            cmd.add(apiKey.trim());
+        }
         if (cacheReuse > 0) {
             cmd.add("--cache-reuse");
             cmd.add(String.valueOf(cacheReuse));
@@ -121,7 +152,8 @@ public class LlamaServerManager {
         };
     }
 
-    private void launch() {
+    /** Starts the process. Returns false when it could not be started (e.g. the binary is missing). */
+    private boolean launch() {
         try {
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.redirectOutput(new File("llama-server.log"));
@@ -129,9 +161,32 @@ public class LlamaServerManager {
             proc = builder.start();
             log.info("[llama] started on port {} (profile={}, parallel={}, logs -> llama-server.log)",
                     port, profile, Math.max(1, parallel));
+            return true;
         } catch (IOException e) {
-            log.warn("[llama] failed to start: {}", e.getMessage());
+            log.error("[llama] failed to start '{}': {}", command.isEmpty() ? "" : command.get(0), e.getMessage());
+            return false;
         }
+    }
+
+    /**
+     * Ends the process we are holding, if any, and waits for it to actually exit. A replacement cannot bind
+     * the port while the old server still holds it, and overwriting {@code proc} would lose the only handle
+     * we have for stopping it.
+     */
+    private void terminateExisting() {
+        Process existing = proc;
+        proc = null;
+        if (existing == null || !existing.isAlive()) return;
+        existing.destroy();
+        try {
+            if (!existing.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                existing.destroyForcibly();
+                existing.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        log.info("[llama] previous server process ended before relaunch.");
     }
 
     private boolean healthy() {
@@ -173,8 +228,13 @@ public class LlamaServerManager {
                 if (shuttingDown) return;
                 if (proc == null || !proc.isAlive() || !healthy()) {
                     log.warn("[llama] watchdog: server unhealthy; restarting...");
-                    launch();
-                    waitUntilReady();
+                    terminateExisting();
+                    if (shuttingDown) return;
+                    if (launch()) {
+                        waitUntilReady();
+                    } else {
+                        log.error("[llama] watchdog: relaunch failed; will retry on the next check.");
+                    }
                 }
             }
         }, "llama-watchdog");

@@ -130,7 +130,9 @@ Type `exit` or `quit` to stop.
 - [`LlamaClient`](src/main/java/com/example/onlineresearcher/LlamaClient.java) talks to the OpenAI-compatible
   `/v1/chat/completions` endpoint.
 - Configuration lives in [`application.properties`](src/main/resources/application.properties); the
-  `llama.*` keys are identical to roleflow's (same model, port 8081, context, etc.).
+  `llama.*` keys are identical to roleflow's (same model, port 8081, context, etc.) except for the bind
+  address: `llama.host` defaults to `127.0.0.1`, because `llama-server` serves its inference API and Web UI
+  without authentication. Binding it anywhere wider is refused at startup unless `llama.api-key` is also set.
 
 ## How memory works (same as roleflow)
 
@@ -200,7 +202,9 @@ See [`application.properties`](src/main/resources/application.properties) for al
 | `research.max-queries` | `4` | Search queries per attempt. |
 | `research.max-attempts` | `3` | Re-search attempts on insufficient info. |
 | `research.max-clarifications` | `3` | Clarifying questions before researching anyway. |
-| `llama.*` | (matches roleflow) | Local model/server settings. |
+| `llama.host` | `127.0.0.1` | Bind address of the managed `llama-server`. Anything but loopback requires `llama.api-key`. |
+| `llama.api-key` | (blank) | Passed to `llama-server` as `--api-key`; required for a non-loopback bind. |
+| `llama.*` | (matches roleflow) | Other local model/server settings. |
 
 Override any of them on the command line, e.g.:
 
