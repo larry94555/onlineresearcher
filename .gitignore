@@ -1,0 +1,8 @@
+target/
+*.log
+llama-server.log
+skills/
+!src/**
+.idea/
+*.iml
+.vscode/
