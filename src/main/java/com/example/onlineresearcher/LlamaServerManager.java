@@ -62,8 +62,7 @@ public class LlamaServerManager {
             return;
         }
         requireAuthenticatedBind(host, apiKey);
-        String unreachable = clientReachabilityWarning(host, clientHost);
-        if (!unreachable.isEmpty()) log.warn("[llama] {}", unreachable);
+        requireReachableClientHost(host, clientHost);
         command = buildCommand();
         log.info("[llama] launching: {}", String.join(" ", redactSecrets(command)));
         if (!launch()) {
@@ -92,18 +91,26 @@ public class LlamaServerManager {
 
     /**
      * The address llama-server binds and the address the client dials are separate settings, so they can
-     * disagree. A server on {@code ::1} is unreachable from {@code 127.0.0.1}, and the only symptom is a
-     * health check that never succeeds — indistinguishable from a slow model download. Returns the warning
-     * to log, or "" when the two can reach each other.
+     * disagree. A server bound to one literal address is not reachable at a different one, and the only
+     * symptom is a health check that never succeeds — ten minutes indistinguishable from a slow model
+     * download, ending in a server nothing can talk to. Nothing recovers that without a restart, so it
+     * fails here, before a process is started or a single second is spent waiting.
+     *
+     * <p>Only literal addresses are judged: a hostname can resolve to either family (or to several
+     * addresses), and a wildcard bind accepts on every interface, so both are left alone.
      */
-    static String clientReachabilityWarning(String bindHost, String clientHost) {
-        if (isWildcard(bindHost)) return "";   // binds every interface; any local address reaches it
-        boolean mismatched = (isIpv6Literal(bindHost) && isIpv4Literal(clientHost))
-                || (isIpv4Literal(bindHost) && isIpv6Literal(clientHost));
-        if (!mismatched) return "";
-        return "llama.host=" + bindHost + " and llama.client-host=" + clientHost + " are literal addresses "
-                + "of different families, so the health check and every chat request will fail to reach the "
-                + "server. Set llama.client-host=" + bindHost + ".";
+    static void requireReachableClientHost(String bindHost, String clientHost) {
+        if (isWildcard(bindHost)) return;                       // accepts on every interface
+        if (!isLiteralAddress(bindHost) || !isLiteralAddress(clientHost)) return;   // hostname: unknowable
+        String bind = LlamaEndpoint.authority(bindHost);
+        if (bind.equals(LlamaEndpoint.authority(clientHost))) return;
+        throw new IllegalStateException("llama.host=" + bindHost + " binds llama-server to that address "
+                + "only, so llama.client-host=" + clientHost + " cannot reach it: the health check and every "
+                + "chat request would fail. Set llama.client-host=" + bindHost + ".");
+    }
+
+    private static boolean isLiteralAddress(String host) {
+        return isIpv6Literal(host) || isIpv4Literal(host);
     }
 
     private static boolean isWildcard(String host) {

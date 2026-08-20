@@ -1,7 +1,10 @@
 package com.example.onlineresearcher;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,18 +73,46 @@ class LlamaServerManagerTest {
     }
 
     @Test
-    void aClientHostOfTheWrongAddressFamilyIsCalledOut() {
+    void aClientHostThatCannotReachTheBindAddressIsRefused() {
         // Otherwise the only symptom is a health check that never succeeds, which reads as a slow start.
-        String warning = LlamaServerManager.clientReachabilityWarning("::1", "127.0.0.1");
-        assertTrue(warning.contains("llama.client-host=::1"), warning);
+        IllegalStateException wrongFamily = assertThrows(IllegalStateException.class,
+                () -> LlamaServerManager.requireReachableClientHost("::1", "127.0.0.1"));
+        assertTrue(wrongFamily.getMessage().contains("llama.client-host=::1"), wrongFamily.getMessage());
 
-        assertEquals("", LlamaServerManager.clientReachabilityWarning("::1", "::1"));
-        assertEquals("", LlamaServerManager.clientReachabilityWarning("127.0.0.1", "127.0.0.1"));
-        assertEquals("", LlamaServerManager.clientReachabilityWarning("0.0.0.0", "127.0.0.1"),
-                "a wildcard bind is reachable from any local address");
-        assertEquals("", LlamaServerManager.clientReachabilityWarning("::", "127.0.0.1"));
-        assertEquals("", LlamaServerManager.clientReachabilityWarning("localhost", "127.0.0.1"),
-                "a hostname can resolve to either family; do not guess");
+        // Same family, different address: bound to one interface, dialled on another.
+        assertThrows(IllegalStateException.class,
+                () -> LlamaServerManager.requireReachableClientHost("192.168.1.5", "127.0.0.1"));
+    }
+
+    @Test
+    void reachableAndUnknowableClientHostsAreLeftAlone() {
+        LlamaServerManager.requireReachableClientHost("::1", "::1");
+        LlamaServerManager.requireReachableClientHost("::1", "[::1]");
+        LlamaServerManager.requireReachableClientHost("127.0.0.1", "127.0.0.1");
+        LlamaServerManager.requireReachableClientHost("0.0.0.0", "127.0.0.1");   // wildcard: every interface
+        LlamaServerManager.requireReachableClientHost("::", "127.0.0.1");
+        // A hostname can resolve to either family, or to several addresses — do not guess.
+        LlamaServerManager.requireReachableClientHost("localhost", "127.0.0.1");
+        LlamaServerManager.requireReachableClientHost("::1", "localhost");
+    }
+
+    @Test
+    void anUnreachableConfigurationStartsNothingAndWaitsForNothing() {
+        LlamaServerManager manager = new LlamaServerManager();
+        ReflectionTestUtils.setField(manager, "manageServer", true);
+        ReflectionTestUtils.setField(manager, "host", "::1");
+        ReflectionTestUtils.setField(manager, "clientHost", "127.0.0.1");
+        ReflectionTestUtils.setField(manager, "binary", "no-such-binary-must-never-run");
+
+        Instant began = Instant.now();
+        assertThrows(IllegalStateException.class, manager::start);
+        Duration took = Duration.between(began, Instant.now());
+
+        // The command is built immediately before launch(), so a null one proves no process was started
+        // and no readiness poll was entered — the failure mode was a ten-minute wait, not a slow one.
+        assertEquals(null, ReflectionTestUtils.getField(manager, "command"), "nothing was launched");
+        assertEquals(null, ReflectionTestUtils.getField(manager, "proc"), "no process handle was kept");
+        assertTrue(took.toSeconds() < 30, "must fail fast, took " + took);
     }
 
     @Test
