@@ -74,6 +74,34 @@ public class SkillStore {
         }
     }
 
+    /**
+     * The persisted version of a skill (from a sidecar {@code <name>.version} file), or 0 when there is no
+     * marker — i.e. a skill written by an older build. Lets an owner rebuild a stale skill automatically.
+     */
+    public synchronized int version(String name) {
+        try {
+            Path file = versionFile(name);
+            if (!Files.exists(file)) return 0;
+            return Integer.parseInt(Files.readString(file, StandardCharsets.UTF_8).trim());
+        } catch (IOException | NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** Records the version of a skill so {@link #version(String)} can detect a later upgrade. */
+    public synchronized void setVersion(String name, int version) {
+        try {
+            Files.createDirectories(directory);
+            Files.writeString(versionFile(name), Integer.toString(version), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            log.warn("[skills] could not write version marker for skill '{}': {}", name, e.getMessage());
+        }
+    }
+
+    private Path versionFile(String name) {
+        return directory.resolve(name.trim().toLowerCase(Locale.ROOT) + ".version");
+    }
+
     Path fileFor(String name) {
         return directory.resolve(name.trim().toLowerCase(Locale.ROOT) + ".md");
     }

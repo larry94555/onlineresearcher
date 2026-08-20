@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ResearchSkillServiceTest {
@@ -51,17 +52,39 @@ class ResearchSkillServiceTest {
     }
 
     @Test
-    void reusesExistingSkillWithoutCallingModel(@TempDir Path dir) {
+    void reusesCurrentVersionSkillWithoutRebuilding(@TempDir Path dir) {
         SkillStore store = new SkillStore(dir.toString());
-        store.save(new Skill("research", "existing", "previously saved guidance"));
-        WebResearchService web = webWith(List.of());
-        ChatModel model = (messages, maxTokens, temperature) -> {
-            throw new IllegalStateException("model must not be called when a skill already exists");
+        WebResearchService web = webWith(List.of(
+                new WebSearchResult("Best practices", "https://guide", "use multiple sources")));
+        // First service builds the skill and stamps it with the current version.
+        new ResearchSkillService(store, web, (m, mt, t) -> "1. Built guidance.").ensureResearchSkill();
+
+        // A second service must reuse the current-version skill without calling the model again.
+        ChatModel forbidden = (m, mt, t) -> {
+            throw new IllegalStateException("model must not be called for a current-version skill");
         };
+        Skill skill = new ResearchSkillService(store, web, forbidden).ensureResearchSkill();
+        assertTrue(skill.instructions().contains("Built guidance"));
+    }
 
-        ResearchSkillService service = new ResearchSkillService(store, web, model);
-        Skill skill = service.ensureResearchSkill();
+    @Test
+    void rebuildsOlderUnversionedSkillSoNewStrategyIsApplied(@TempDir Path dir) {
+        SkillStore store = new SkillStore(dir.toString());
+        // An existing skill saved by a previous version has no version marker.
+        store.save(new Skill("research", "old", "stale guidance"));
+        WebResearchService web = webWith(List.of());   // empty -> built-in default, no model call
 
-        assertEquals("previously saved guidance", skill.instructions());
+        Skill skill = new ResearchSkillService(store, web, (m, mt, t) -> "unused").ensureResearchSkill();
+
+        assertFalse(skill.instructions().equals("stale guidance"), "stale skill should be rebuilt");
+        assertTrue(skill.instructions().toLowerCase().contains("authoritative"));
+    }
+
+    @Test
+    void defaultInstructionsIncludeAuthoritativeSourceStrategy() {
+        String d = ResearchSkillService.DEFAULT_INSTRUCTIONS.toLowerCase();
+        assertTrue(d.contains("identify the authoritative"), "should identify authoritative sources");
+        assertTrue(d.contains("prefer those authoritative sources"), "should prefer authoritative sources");
+        assertTrue(d.contains("against those authoritative sources"), "should check facts against them");
     }
 }

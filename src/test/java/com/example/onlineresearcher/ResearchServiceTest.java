@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,6 +19,7 @@ class ResearchServiceTest {
     private static class ScriptedModel implements ChatModel {
         String clarity = "CLEAR";
         String queries = "first query\nsecond query";
+        String queriesAfterFeedback = "third query\nfourth query";
         final List<String> sufficiencySequence = new ArrayList<>(List.of("SUFFICIENT"));
         String synthesis = "FINAL RESEARCH ANSWER\nSources:\n[1] T - https://t";
         final AtomicInteger sufficiencyCalls = new AtomicInteger();
@@ -27,7 +29,11 @@ class ResearchServiceTest {
             String system = messages.stream().filter(m -> m.role().equals("system"))
                     .map(Message::content).findFirst().orElse("");
             if (system.contains("decide whether a user's request")) return clarity;
-            if (system.contains("generate web search queries")) return queries;
+            if (system.contains("web search engine queries")) {
+                boolean hasFeedback = messages.stream()
+                        .anyMatch(m -> m.content().contains("previous search returned too little"));
+                return hasFeedback ? queriesAfterFeedback : queries;
+            }
             if (system.contains("judge whether the gathered")) {
                 int i = Math.min(sufficiencyCalls.getAndIncrement(), sufficiencySequence.size() - 1);
                 return sufficiencySequence.get(i);
@@ -37,13 +43,15 @@ class ResearchServiceTest {
         }
     }
 
-    /** Fake web provider that records how many times it was queried. */
+    /** Fake web provider that records how many times it was queried and with what. */
     private static class CountingProvider implements SearchProvider {
         final AtomicInteger calls = new AtomicInteger();
+        final List<String> queries = new ArrayList<>();
         @Override public String name() { return "fake"; }
         @Override public boolean enabled() { return true; }
         @Override public List<WebSearchResult> search(String query, int maxResults) {
             calls.incrementAndGet();
+            queries.add(query);
             return List.of(new WebSearchResult("Result for " + query, "https://x/" + calls.get(), "snippet"));
         }
     }
@@ -55,11 +63,13 @@ class ResearchServiceTest {
     private ResearchService service(ConversationMemory memory, ScriptedModel model, CountingProvider provider,
                                     Path skillsDir, int maxAttempts, int maxClarifications) {
         SkillStore store = new SkillStore(skillsDir.toString());
-        store.save(new Skill("research", "desc", "test research guidance"));
         WebResearchService web = new WebResearchService(List.of(provider));
         ResearchSkillService skillService = new ResearchSkillService(store, web, model);
-        return new ResearchService(memory, model, web, skillService,
-                256, 2, maxAttempts, 16000, 3, maxClarifications);
+        // Pre-build + version-stamp the skill via an empty web so the per-turn ensureResearchSkill() does
+        // not rebuild (and issue a bootstrap web search) during the test and skew provider call counts.
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        return new ResearchService(memory, model, web, skillService, new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, maxAttempts, 16000, 3, maxClarifications);
     }
 
     @Test
@@ -102,8 +112,159 @@ class ResearchServiceTest {
 
         assertTrue(answer.contains("FINAL RESEARCH ANSWER"));
         assertTrue(model.sufficiencyCalls.get() >= 2, "should evaluate sufficiency more than once");
-        // 2 queries per attempt x 2 attempts = 4 provider calls.
-        assertEquals(4, provider.calls.get());
+        // A second attempt ran with NEW (deduplicated) queries, so more searches than a single attempt.
+        assertTrue(provider.calls.get() >= 3, "second attempt should issue fresh queries: " + provider.calls.get());
+    }
+
+    @Test
+    void answersNewTopicWithoutBleedingFromPreviousConversation(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        // A substantial prior answer is already in memory (as the real Jacobsthal turn was).
+        memory.recordExchange("old jacobsthal question",
+                "PRIOR_ANSWER: the jacobsthal numbers are an integer sequence named after Ernst Jacobsthal");
+
+        AtomicBoolean synthesisSawPrior = new AtomicBoolean(false);
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            boolean sawPrior = messages.stream().anyMatch(m -> m.content().contains("PRIOR_ANSWER"));
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "score query";
+            if (system.contains("judge whether the gathered")) return "SUFFICIENT";
+            if (system.contains("careful research assistant")) {
+                if (sawPrior) synthesisSawPrior.set(true);
+                return "NEW TOPIC ANSWER";
+            }
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchSkillService skillService = new ResearchSkillService(store, web, model);
+        ResearchService service = new ResearchService(memory, model, web, skillService,
+                new SportsScoreSkillService(store), new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        String answer = service.handle("what was the score in today's match");
+
+        assertFalse(synthesisSawPrior.get(),
+                "synthesis must not receive the previous unrelated conversation");
+        assertTrue(answer.contains("NEW TOPIC ANSWER"), answer);
+    }
+
+    @Test
+    void appliesSportsScoreSkillForScoreQuestions(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        AtomicBoolean sawSportsSkill = new AtomicBoolean(false);
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("Sportradar")) sawSportsSkill.set(true);   // a sports-score skill marker
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "japan brazil score";
+            if (system.contains("judge whether the gathered")) return "SUFFICIENT";
+            if (system.contains("careful research assistant")) return "ANSWER";
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchSkillService skillService = new ResearchSkillService(store, web, model);
+        ResearchService service = new ResearchService(memory, model, web, skillService,
+                new SportsScoreSkillService(store), new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        service.handle("what was the score in the world cup game between japan and brazil");
+
+        assertTrue(sawSportsSkill.get(), "the sports-score skill should be injected for a score question");
+    }
+
+    @Test
+    void fallsBackToAgentAccessibleSitesBeforeGivingUp(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        AtomicInteger synthCalls = new AtomicInteger();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "obscure topic";
+            if (system.contains("judge whether the gathered")) return "INSUFFICIENT: missing";
+            if (system.contains("List up to 4 specific web sources")) return "specialsite.org";
+            if (system.contains("careful research assistant")) {
+                // First synthesis can't answer; after the fallback adds sources, the second one can.
+                return synthCalls.incrementAndGet() == 1 ? "NEED_MORE_SOURCES" : "FALLBACK ANSWER";
+            }
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        String answer = service.handle("an obscure topic with no easy answer");
+
+        assertTrue(answer.contains("FALLBACK ANSWER"), answer);
+        // The fallback issued site-targeted queries using the suggested source.
+        assertTrue(provider.queries.stream().anyMatch(q -> q.contains("specialsite")),
+                "fallback should query the suggested site: " + provider.queries);
+    }
+
+    @Test
+    void reportsClearNotFoundWhenEverythingFails(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "topic";
+            if (system.contains("judge whether the gathered")) return "INSUFFICIENT: missing";
+            if (system.contains("List up to 4 specific web sources")) return "somewhere.org";
+            if (system.contains("found nothing usable")) return "NONE";       // no useful clarification
+            if (system.contains("careful research assistant")) return "NEED_MORE_SOURCES";
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        String answer = service.handle("something unfindable");
+
+        assertEquals(ResearchService.NOT_FOUND_MESSAGE, answer);
+    }
+
+    @Test
+    void notFoundAppendsClarifyingQuestionWhenItHelps(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "topic";
+            if (system.contains("judge whether the gathered")) return "INSUFFICIENT: missing";
+            if (system.contains("List up to 4 specific web sources")) return "";   // no sites suggested
+            if (system.contains("found nothing usable")) return "Which year are you asking about?";
+            if (system.contains("careful research assistant")) return "NEED_MORE_SOURCES";
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 3);
+
+        String answer = service.handle("something unfindable");
+
+        assertTrue(answer.startsWith(ResearchService.NOT_FOUND_MESSAGE), answer);
+        assertTrue(answer.contains("Which year are you asking about?"), answer);
     }
 
     @Test

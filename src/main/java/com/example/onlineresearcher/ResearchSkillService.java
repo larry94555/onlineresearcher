@@ -24,28 +24,46 @@ public class ResearchSkillService {
     private static final String BOOTSTRAP_QUERY =
             "best practices for doing research on the web and fact checking sources";
 
+    /** Bumping this rebuilds any saved skill on next use, so existing installs pick up new strategy. */
+    static final int SKILL_VERSION = 2;
+
     /** Used when the model is asked to turn raw best-practice snippets into a skill. */
     private static final String SYNTHESIS_SYSTEM = """
             You are writing a reusable "research" skill: concise, durable guidance an AI agent will follow
             every time it researches a topic on the web. Using the web snippets provided (and sound general
             knowledge of research methodology), write the skill as a numbered list of imperative best
-            practices. Cover at least: forming focused search queries; using multiple independent sources;
-            preferring primary and authoritative sources; cross-checking and corroborating facts; watching
-            for bias, dates, and outdated information; distinguishing facts from opinion; and citing sources
-            with their URLs. Output only the guidance itself — no preamble, no closing remarks.
+            practices. Cover at least: forming focused search queries; identifying the authoritative and
+            reputable sources for the specific topic; preferring those authoritative sources over less
+            reliable sites; checking facts against those authoritative sources; using multiple independent
+            sources; cross-checking and corroborating facts; watching for bias, dates, and outdated
+            information; distinguishing facts from opinion; and citing sources with their URLs. Output only
+            the guidance itself — no preamble, no closing remarks.
             """;
 
     /** Built-in fallback so the agent always has research guidance even with no network/model. */
     static final String DEFAULT_INSTRUCTIONS = """
-            1. Break the topic into focused, specific search queries; vary the wording across attempts.
-            2. Gather from several independent sources rather than relying on a single page.
-            3. Prefer primary, authoritative, and recent sources; note the publication date of each claim.
-            4. Corroborate every important fact across at least two independent sources before trusting it.
-            5. Watch for bias, marketing language, and conflicts of interest; separate fact from opinion.
-            6. Flag uncertainty and disagreement between sources instead of papering over it.
-            7. Distinguish what the sources actually state from your own inference.
-            8. Cite the sources you used, with their URLs, so the reader can verify the findings.
-            9. If the gathered information is thin or contradictory, refine the queries and search again.
+            1. Break the topic into focused, specific keyword queries (2-8 words); vary the wording across
+               attempts. Search engine queries are keywords, not sentences or markdown.
+            2. When the question is about how two things relate ("relation between X and Y", "X vs Y"),
+               research EACH thing separately first ("X", "Y") and, if relevant, the person or origin they
+               are named after. The link (or lack of one) emerges from understanding each side.
+            3. Identify the authoritative and reputable sources for THIS topic before trusting general
+               results: e.g. official sites and standards bodies, encyclopedias (Wikipedia), domain
+               references (OEIS for integer sequences, peer-reviewed journals for science/medicine, official
+               documentation for software/products), and recognized experts. Note which sources those are.
+            4. Prefer those authoritative sources over blogs, forums, SEO/marketing pages, and AI-generated
+               content when they cover the topic; give their facts more weight when sources disagree.
+            5. Check every important fact AGAINST those authoritative sources; corroborate across at least
+               two independent sources before trusting it, and note the publication date of each claim.
+            6. Gather from several independent sources rather than relying on a single page.
+            7. Watch for bias, marketing language, and conflicts of interest; separate fact from opinion.
+            8. Flag uncertainty and disagreement between sources instead of papering over it.
+            9. Distinguish what the sources actually state from your own inference.
+            10. A negative answer is a real answer: if two subjects are clearly defined and nothing connects
+                them, conclude they are unrelated except superficially (e.g. they only share a name because
+                they are named after the same person). Absence of any linking source is itself evidence.
+            11. Cite the sources you used, with their URLs, so the reader can verify the findings.
+            12. If the gathered information is thin or contradictory, refine the queries and search again.
             """;
 
     private final SkillStore store;
@@ -66,14 +84,22 @@ public class ResearchSkillService {
      */
     public synchronized Skill ensureResearchSkill() {
         Skill existing = store.get(SKILL_NAME);
-        if (existing != null && existing.instructions() != null && !existing.instructions().isBlank()) {
+        boolean valid = existing != null && existing.instructions() != null
+                && !existing.instructions().isBlank();
+        if (valid && store.version(SKILL_NAME) == SKILL_VERSION) {
             return existing;
         }
-        log.info("[skills] research skill not found; bootstrapping it from web best practices...");
+        if (valid) {
+            log.info("[skills] research skill is from an older version (v{} != v{}); rebuilding it so the "
+                    + "latest strategy is applied...", store.version(SKILL_NAME), SKILL_VERSION);
+        } else {
+            log.info("[skills] research skill not found; bootstrapping it from web best practices...");
+        }
         String instructions = buildInstructions();
         Skill skill = new Skill(SKILL_NAME, SKILL_DESCRIPTION, instructions);
         try {
             store.save(skill);
+            store.setVersion(SKILL_NAME, SKILL_VERSION);
         } catch (RuntimeException e) {
             log.warn("[skills] could not persist research skill ({}); using it in-memory for this run",
                     e.getMessage());

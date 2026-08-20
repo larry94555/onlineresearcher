@@ -23,7 +23,7 @@ class TerminalPromptRunnerTest {
             String system = messages.stream().filter(x -> x.role().equals("system"))
                     .map(Message::content).findFirst().orElse("");
             if (system.contains("decide whether a user's request")) return "CLEAR";
-            if (system.contains("generate web search queries")) return "query";
+            if (system.contains("web search engine queries")) return "query";
             if (system.contains("judge whether the gathered")) return "SUFFICIENT";
             if (system.contains("careful research assistant")) return "RESEARCHED ANSWER";
             return "";
@@ -40,7 +40,7 @@ class TerminalPromptRunnerTest {
         WebResearchService web = new WebResearchService(List.of(provider));
         ResearchSkillService skillService = new ResearchSkillService(store, web, model);
         ResearchService research = new ResearchService(memory, model, web, skillService,
-                256, 2, 2, 16000, 3, 3);
+                new SportsScoreSkillService(store), new FailToFindSkillService(store), 256, 2, 2, 16000, 3, 3);
 
         TerminalPromptRunner runner = new TerminalPromptRunner(research);
         BufferedReader in = new BufferedReader(new StringReader("apples nutrition\nexit\n"));
