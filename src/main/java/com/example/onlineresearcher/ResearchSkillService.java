@@ -25,10 +25,10 @@ public class ResearchSkillService {
             "best practices for doing research on the web and fact checking sources";
 
     /** Bumping this rebuilds any saved skill on next use, so existing installs pick up new strategy. */
-    static final int SKILL_VERSION = 3;
+    static final int SKILL_VERSION = 4;
 
     /** Used when the model is asked to turn raw best-practice snippets into a skill. */
-    private static final String SYNTHESIS_SYSTEM = """
+    static final String SYNTHESIS_SYSTEM = """
             You are writing a reusable "research" skill: concise, durable guidance an AI agent will follow
             every time it researches a topic on the web. Using the web snippets provided (and sound general
             knowledge of research methodology), write the skill as a numbered list of imperative best
@@ -36,8 +36,24 @@ public class ResearchSkillService {
             reputable sources for the specific topic; preferring those authoritative sources over less
             reliable sites; checking facts against those authoritative sources; using multiple independent
             sources; cross-checking and corroborating facts; watching for bias, dates, and outdated
-            information; distinguishing facts from opinion; and citing sources with their URLs. Output only
-            the guidance itself — no preamble, no closing remarks.
+            information; distinguishing facts from opinion; treating a search that surfaced no connection
+            between two subjects as unresolved rather than as proof that no connection exists; and citing
+            sources with their URLs. Output only the guidance itself — no preamble, no closing remarks.
+            """;
+
+    /**
+     * Appended to every research skill, however it was built. The model-synthesized guidance is written
+     * from web snippets and cannot be relied on to state this — and guidance that omits it is injected into
+     * every step of the flow, where it becomes the false negative the synthesis prompts are written to
+     * prevent. Kept here once, so the built-in default and the synthesized text carry the identical rule.
+     */
+    static final String REQUIRED_POLICY = """
+            Non-negotiable rules — these hold whatever else this guidance says:
+            - Do not turn a failed search into a finding. If no source addresses whether two subjects are
+              related, report the relationship as unresolved: none of the sources searched describes a
+              connection, which is not the same as establishing that none exists.
+            - Conclude that two subjects are unrelated, or related only by a shared name, only when a source
+              actually says so (a disambiguation or namesake page does).
             """;
 
     /** Built-in fallback so the agent always has research guidance even with no network/model. */
@@ -59,13 +75,8 @@ public class ResearchSkillService {
             7. Watch for bias, marketing language, and conflicts of interest; separate fact from opinion.
             8. Flag uncertainty and disagreement between sources instead of papering over it.
             9. Distinguish what the sources actually state from your own inference.
-            10. Do not turn a failed search into a finding. If no source addresses whether two subjects are
-                related, report the relationship as unresolved — none of the sources searched describes a
-                connection — which is not the same as establishing that none exists. Conclude that two
-                subjects are unrelated, or related only by a shared name, only when a source actually says so
-                (a disambiguation or namesake page does).
-            11. Cite the sources you used, with their URLs, so the reader can verify the findings.
-            12. If the gathered information is thin or contradictory, refine the queries and search again.
+            10. Cite the sources you used, with their URLs, so the reader can verify the findings.
+            11. If the gathered information is thin or contradictory, refine the queries and search again.
             """;
 
     private final SkillStore store;
@@ -120,11 +131,11 @@ public class ResearchSkillService {
             found = webResearch.search(BOOTSTRAP_QUERY, 6);
         } catch (RuntimeException e) {
             log.warn("[skills] web search for best practices failed: {}", e.getMessage());
-            return DEFAULT_INSTRUCTIONS.strip();
+            return withRequiredPolicy(DEFAULT_INSTRUCTIONS);
         }
         if (found.isEmpty()) {
             log.info("[skills] no web results for best practices; using built-in research guidance");
-            return DEFAULT_INSTRUCTIONS.strip();
+            return withRequiredPolicy(DEFAULT_INSTRUCTIONS);
         }
         String evidence = formatEvidence(found.results());
         try {
@@ -132,11 +143,21 @@ public class ResearchSkillService {
                     List.of(Message.system(SYNTHESIS_SYSTEM),
                             Message.user("Web snippets on research best practices:\n\n" + evidence)),
                     summaryMaxTokens, 0.2).strip();
-            return synthesized.isBlank() ? DEFAULT_INSTRUCTIONS.strip() : synthesized;
+            return withRequiredPolicy(synthesized.isBlank() ? DEFAULT_INSTRUCTIONS : synthesized);
         } catch (Exception e) {
             log.warn("[skills] model synthesis of research skill failed: {}", e.getMessage());
-            return DEFAULT_INSTRUCTIONS.strip();
+            return withRequiredPolicy(DEFAULT_INSTRUCTIONS);
         }
+    }
+
+    /**
+     * Guidance plus the non-negotiable rules. Every path through {@link #buildInstructions} ends here, so
+     * no skill — built in, synthesized, or rebuilt — can ship without them.
+     */
+    static String withRequiredPolicy(String instructions) {
+        String guidance = instructions == null || instructions.isBlank()
+                ? DEFAULT_INSTRUCTIONS.strip() : instructions.strip();
+        return guidance + "\n\n" + REQUIRED_POLICY.strip();
     }
 
     private static String formatEvidence(List<WebSearchResult> results) {

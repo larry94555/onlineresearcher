@@ -48,7 +48,8 @@ class ResearchSkillServiceTest {
         ResearchSkillService service = new ResearchSkillService(store, web, model);
         Skill skill = service.ensureResearchSkill();
 
-        assertEquals(ResearchSkillService.DEFAULT_INSTRUCTIONS.strip(), skill.instructions());
+        assertTrue(skill.instructions().startsWith(ResearchSkillService.DEFAULT_INSTRUCTIONS.strip()));
+        assertTrue(skill.instructions().endsWith(ResearchSkillService.REQUIRED_POLICY.strip()));
     }
 
     @Test
@@ -89,14 +90,40 @@ class ResearchSkillServiceTest {
     }
 
     @Test
-    void defaultInstructionsDoNotTreatAMissedSearchAsAFinding() {
-        String d = ResearchSkillService.DEFAULT_INSTRUCTIONS.toLowerCase();
-        // The guidance is injected into every step, so it must not contradict the prompts: a search that
-        // surfaced no connection leaves the relationship unresolved, it does not disprove one.
-        assertFalse(d.contains("absence of any linking source is itself evidence"),
-                "absence of evidence must not be taught as evidence of absence");
-        assertTrue(d.contains("unresolved"), "an unaddressed relationship should be reported as unresolved");
-        assertTrue(d.contains("only when a source actually says so"),
-                "a negative conclusion needs a source that states it");
+    void everySkillCarriesTheRelationshipPolicyWhicheverPathBuiltIt(@TempDir Path dir) {
+        // The online path is the normal one: any nonempty search sends the guidance through the model, whose
+        // synthesized text is written from web snippets and cannot be trusted to state the invariant. The
+        // guidance is injected into every step of the flow, so it must never contradict the prompts.
+        ChatModel omitsThePolicy = (m, mt, t) ->
+                "1. Search widely.\n2. If no source links two subjects, conclude they are unrelated.";
+        WebResearchService web = webWith(List.of(
+                new WebSearchResult("Best practices", "https://guide", "use multiple sources")));
+
+        Skill synthesized = new ResearchSkillService(new SkillStore(dir.resolve("online").toString()),
+                web, omitsThePolicy).ensureResearchSkill();
+        Skill builtIn = new ResearchSkillService(new SkillStore(dir.resolve("offline").toString()),
+                webWith(List.of()), omitsThePolicy).ensureResearchSkill();
+
+        assertTrue(synthesized.instructions().contains("Search widely"), "the synthesized text is kept");
+        for (Skill skill : List.of(synthesized, builtIn)) {
+            // Single-spaced: the rules are line-wrapped in the guidance.
+            String lower = skill.instructions().toLowerCase().replaceAll("\\s+", " ");
+            assertTrue(skill.instructions().contains(ResearchSkillService.REQUIRED_POLICY.strip()),
+                    "the non-negotiable rules must survive every build path: " + skill.instructions());
+            assertTrue(lower.contains("unresolved"), "an unaddressed relationship is unresolved");
+            assertTrue(lower.contains("only when a source actually says so"),
+                    "a negative conclusion needs a source that states it");
+            assertFalse(lower.contains("absence of any linking source is itself evidence"),
+                    "absence of evidence must not be taught as evidence of absence");
+        }
+    }
+
+    @Test
+    void theSynthesisPromptAsksForTheRelationshipRuleToo() {
+        assertTrue(ResearchSkillService.REQUIRED_POLICY.contains("unresolved"));
+        // Appending is the guarantee; asking is what keeps the synthesized text from arguing against it.
+        assertTrue(ResearchSkillService.SYNTHESIS_SYSTEM.contains(
+                        "rather than as proof that no connection exists"),
+                ResearchSkillService.SYNTHESIS_SYSTEM);
     }
 }
