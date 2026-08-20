@@ -26,6 +26,9 @@ public class LlamaClient {
     @Value("${llama.port:8081}") private int port = 8081;
     @Value("${llama.alias:qwen2.5-3b-instruct}") private String model = "qwen2.5-3b-instruct";
     @Value("${llama.cache-prompt:true}") private boolean cachePrompt = true;
+    // The same key llama-server was started with. Without it, a server that requires authentication
+    // answers every request with 401 — which is exactly the configuration a non-loopback bind demands.
+    @Value("${llama.api-key:}") private String apiKey = "";
     @Value("${prompt.max-tokens:1024}") private int maxTokens = 1024;
 
     private final HttpClient http = HttpClient.newBuilder()
@@ -65,12 +68,7 @@ public class LlamaClient {
         }
         int responseTokens = maxTokens != null && maxTokens > 0 ? maxTokens : this.maxTokens;
         Map<String, Object> body = requestBody(model, messages, responseTokens, cachePrompt, temperature);
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://" + host + ":" + port + "/v1/chat/completions"))
-                .timeout(Duration.ofMinutes(10))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
-                .build();
+        HttpRequest request = buildRequest(host, port, apiKey, mapper.writeValueAsString(body));
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() / 100 != 2) {
             throw new IllegalStateException("llama-server " + response.statusCode() + ": " + response.body());
@@ -81,6 +79,22 @@ public class LlamaClient {
             throw new IllegalStateException("Unexpected llama-server response: " + response.body());
         }
         return content.asText();
+    }
+
+    /**
+     * Builds the chat request, adding the bearer token when a key is configured. llama-server started with
+     * an API key rejects unauthenticated calls with 401, and a non-loopback bind always has one
+     * (see {@link LlamaServerManager#requireAuthenticatedBind}).
+     */
+    static HttpRequest buildRequest(String host, int port, String apiKey, String json) {
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create("http://" + host + ":" + port + "/v1/chat/completions"))
+                .timeout(Duration.ofMinutes(10))
+                .header("Content-Type", "application/json");
+        if (apiKey != null && !apiKey.isBlank()) {
+            request.header("Authorization", "Bearer " + apiKey.trim());
+        }
+        return request.POST(HttpRequest.BodyPublishers.ofString(json)).build();
     }
 
     static Map<String, Object> requestBody(String model, List<Map<String, Object>> messages,

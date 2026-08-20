@@ -203,7 +203,7 @@ See [`application.properties`](src/main/resources/application.properties) for al
 | `research.max-attempts` | `3` | Re-search attempts on insufficient info. |
 | `research.max-clarifications` | `3` | Clarifying questions before researching anyway. |
 | `llama.host` | `127.0.0.1` | Bind address of the managed `llama-server`. Anything but loopback requires `llama.api-key`. |
-| `llama.api-key` | (blank) | Passed to `llama-server` as `--api-key`; required for a non-loopback bind. |
+| `llama.api-key` | (blank) | Required for a non-loopback bind. Passed to `llama-server` via `LLAMA_API_KEY` (not the command line) and sent by the client as a bearer token. |
 | `llama.*` | (matches roleflow) | Other local model/server settings. |
 
 Override any of them on the command line, e.g.:

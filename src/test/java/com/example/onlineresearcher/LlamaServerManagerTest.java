@@ -2,7 +2,9 @@ package com.example.onlineresearcher;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,11 +48,32 @@ class LlamaServerManagerTest {
     }
 
     @Test
-    void defaultsBindToLoopbackAndPassNoApiKey() {
+    void defaultsBindToLoopback() {
         List<String> command = new LlamaServerManager().buildCommand();
         int host = command.indexOf("--host");
         assertTrue(host >= 0, command.toString());
         assertEquals("127.0.0.1", command.get(host + 1));
-        assertFalse(command.contains("--api-key"), command.toString());
+    }
+
+    @Test
+    void theApiKeyTravelsInTheEnvironmentNotTheCommandLine() {
+        // Process arguments are readable by anyone who can list processes, and the command is logged.
+        assertFalse(new LlamaServerManager().buildCommand().contains("--api-key"));
+
+        Map<String, String> environment = new HashMap<>();
+        LlamaServerManager.applyApiKey(environment, "  s3cret  ");
+        assertEquals("s3cret", environment.get("LLAMA_API_KEY"));
+
+        Map<String, String> unauthenticated = new HashMap<>();
+        LlamaServerManager.applyApiKey(unauthenticated, "");
+        assertTrue(unauthenticated.isEmpty(), "no key configured means no environment entry");
+    }
+
+    @Test
+    void aKeyPassedThroughExtraArgsIsRedactedFromTheLog() {
+        List<String> logged = LlamaServerManager.redactSecrets(
+                List.of("llama-server", "--api-key", "s3cret", "--jinja"));
+
+        assertEquals(List.of("llama-server", "--api-key", "***", "--jinja"), logged);
     }
 }

@@ -64,7 +64,7 @@ public class LlamaServerManager {
         }
         requireAuthenticatedBind(host, apiKey);
         command = buildCommand();
-        log.info("[llama] launching: {}", String.join(" ", command));
+        log.info("[llama] launching: {}", String.join(" ", redactSecrets(command)));
         if (!launch()) {
             // A launch failure (missing binary, bad path) never becomes healthy: polling for ten minutes
             // would only hang startup, so report it and leave the server unmanaged.
@@ -87,6 +87,28 @@ public class LlamaServerManager {
         if (isLoopback(host) || (apiKey != null && !apiKey.isBlank())) return;
         throw new IllegalStateException("llama.host=" + host + " exposes llama-server beyond this machine "
                 + "but llama.api-key is not set. Either bind to 127.0.0.1 (the default) or set llama.api-key.");
+    }
+
+    /**
+     * Hands the API key to llama-server through the environment rather than the command line. Process
+     * arguments are readable by anyone who can list processes, and the command is also logged; an
+     * environment variable is neither. llama.cpp reads {@code LLAMA_API_KEY} for its {@code --api-key} flag.
+     */
+    static void applyApiKey(java.util.Map<String, String> environment, String apiKey) {
+        if (apiKey == null || apiKey.isBlank()) return;
+        environment.put("LLAMA_API_KEY", apiKey.trim());
+    }
+
+    /**
+     * Masks the value of any {@code --api-key} argument before the command is logged. Our own key never
+     * reaches the command line, but {@code llama.extra-args} is passed through verbatim and could carry one.
+     */
+    static List<String> redactSecrets(List<String> command) {
+        List<String> safe = new ArrayList<>(command);
+        for (int i = 0; i < safe.size() - 1; i++) {
+            if (safe.get(i).equals("--api-key")) safe.set(i + 1, "***");
+        }
+        return safe;
     }
 
     /** True when the bind address reaches only this machine. Blank means llama-server's own default (loopback). */
@@ -124,10 +146,6 @@ public class LlamaServerManager {
         cmd.add("--parallel"); cmd.add(String.valueOf(Math.max(1, parallel)));
         cmd.add("--alias"); cmd.add(alias);
         cmd.add("--jinja");
-        if (!apiKey.isBlank()) {
-            cmd.add("--api-key");
-            cmd.add(apiKey.trim());
-        }
         if (cacheReuse > 0) {
             cmd.add("--cache-reuse");
             cmd.add(String.valueOf(cacheReuse));
@@ -156,6 +174,7 @@ public class LlamaServerManager {
     private boolean launch() {
         try {
             ProcessBuilder builder = new ProcessBuilder(command);
+            applyApiKey(builder.environment(), apiKey);
             builder.redirectOutput(new File("llama-server.log"));
             builder.redirectError(new File("llama-server.log"));
             proc = builder.start();
