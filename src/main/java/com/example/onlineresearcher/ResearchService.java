@@ -48,8 +48,9 @@ public class ResearchService {
     private boolean awaitingClarification;
     private String pendingTopic;
     private int clarificationCount;
-    // Follow-up questions asked after a not-found result, capped like the up-front clarifications so a
-    // topic that stays unfindable cannot keep asking forever.
+    // Follow-up questions asked about the topic currently being clarified, after a not-found result.
+    // Capped like the up-front clarifications so a topic that stays unfindable cannot keep asking forever,
+    // and reset when a new topic begins.
     private int notFoundFollowUps;
 
     public ResearchService(ConversationMemory memory, ChatModel model, WebResearchService webResearch,
@@ -94,6 +95,9 @@ public class ResearchService {
             topic = pendingTopic + "\nAdditional detail from the user: " + userInput.strip();
         } else {
             topic = userInput.strip();
+            // A new, independent topic starts with a fresh allowance: the follow-up budget belongs to the
+            // topic being clarified, not to the session, or one unfindable topic would silence the next.
+            notFoundFollowUps = 0;
         }
 
         // Step 1: assemble the skill guidance for this topic — the research skill always, plus the
@@ -126,9 +130,6 @@ public class ResearchService {
             answer = "Sorry — research failed: " + e.getMessage();
         }
         memory.recordExchange(userInput, answer);
-        if (!answer.startsWith(NOT_FOUND_MESSAGE)) {
-            notFoundFollowUps = 0;   // the topic was answered; the follow-up budget starts over
-        }
         return answer;
     }
 

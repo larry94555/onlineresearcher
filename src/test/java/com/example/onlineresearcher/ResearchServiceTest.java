@@ -314,6 +314,43 @@ class ResearchServiceTest {
     }
 
     @Test
+    void aNewTopicGetsItsOwnNotFoundFollowUpAllowance(@TempDir Path dir) {
+        ConversationMemory memory = memory();
+        ChatModel model = (messages, mt, t) -> {
+            String system = messages.stream().filter(m -> m.role().equals("system"))
+                    .map(Message::content).findFirst().orElse("");
+            if (system.contains("decide whether a user's request")) return "CLEAR";
+            if (system.contains("web search engine queries")) return "topic";
+            if (system.contains("judge whether the gathered")) return "INSUFFICIENT: missing";
+            if (system.contains("List up to 4 specific web sources")) return "";
+            if (system.contains("found nothing usable")) return "Which year are you asking about?";
+            if (system.contains("careful research assistant")) return "NEED_MORE_SOURCES";
+            return "";
+        };
+        CountingProvider provider = new CountingProvider();
+        SkillStore store = new SkillStore(dir.toString());
+        WebResearchService web = new WebResearchService(List.of(provider));
+        new ResearchSkillService(store, new WebResearchService(List.of()), model).ensureResearchSkill();
+        // One follow-up allowed per topic.
+        ResearchService service = new ResearchService(memory, model, web,
+                new ResearchSkillService(store, web, model), new SportsScoreSkillService(store),
+                new FailToFindSkillService(store), 256, 2, 1, 16000, 3, 1);
+
+        // Topic A: asks its one follow-up, then exhausts the allowance on the answer.
+        assertTrue(service.handle("first unfindable topic").contains("Which year are you asking about?"));
+        assertTrue(service.awaitingReply());
+        assertEquals(ResearchService.NOT_FOUND_MESSAGE, service.handle("1997"));
+        assertFalse(service.awaitingReply());
+
+        // Topic B is independent: topic A's exhausted allowance must not silence it.
+        String second = service.handle("a completely different unfindable topic");
+
+        assertTrue(second.contains("Which year are you asking about?"),
+                "a new topic starts with a fresh follow-up allowance: " + second);
+        assertTrue(service.awaitingReply());
+    }
+
+    @Test
     void sufficiencyRequiresEvidenceThatAddressesTheRelationship(@TempDir Path dir) {
         ConversationMemory memory = memory();
         List<String> sufficiencyPrompts = new ArrayList<>();
