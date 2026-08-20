@@ -42,7 +42,8 @@ class TerminalPromptRunnerTest {
         ResearchService research = new ResearchService(memory, model, web, skillService,
                 new SportsScoreSkillService(store), new FailToFindSkillService(store), 256, 2, 2, 16000, 3, 3);
 
-        TerminalPromptRunner runner = new TerminalPromptRunner(research);
+        // Null context: loop() is driven directly here, so nothing should be shut down.
+        TerminalPromptRunner runner = new TerminalPromptRunner(research, null);
         BufferedReader in = new BufferedReader(new StringReader("apples nutrition\nexit\n"));
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         PrintStream out = new PrintStream(bytes, true, StandardCharsets.UTF_8);

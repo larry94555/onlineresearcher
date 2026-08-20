@@ -2,6 +2,8 @@ package com.example.onlineresearcher;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
@@ -14,6 +16,10 @@ import java.nio.charset.StandardCharsets;
  * clarifying question or a researched answer. Runs on a daemon thread so it never blocks application
  * startup, and is disabled automatically during tests via {@code researcher.terminal.enabled=false}. The
  * {@link #loop} method is package-private so it can be driven by a unit test with in-memory streams.
+ *
+ * <p>The terminal loop <em>is</em> this application's session: when it ends (the user types {@code exit},
+ * or stdin closes) the Spring context is closed and the JVM exits. Without that, the embedded web server
+ * started by {@code spring-boot-starter-web} keeps non-daemon threads running and the process never ends.
  */
 @Component
 public class TerminalPromptRunner implements CommandLineRunner {
@@ -25,18 +31,28 @@ public class TerminalPromptRunner implements CommandLineRunner {
     private static final String THINKING = "researching...";
 
     private final ResearchService research;
+    /** Closed when the prompt loop ends. Null in unit tests, which drive {@link #loop} directly. */
+    private final ConfigurableApplicationContext context;
 
     @Value("${researcher.terminal.enabled:true}") private boolean enabled = true;
 
-    public TerminalPromptRunner(ResearchService research) {
+    public TerminalPromptRunner(ResearchService research, ConfigurableApplicationContext context) {
         this.research = research;
+        this.context = context;
     }
 
     @Override
     public void run(String... args) {
         if (!enabled) return;
         Thread thread = new Thread(
-                () -> loop(new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)), System.out),
+                () -> {
+                    try {
+                        loop(new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)),
+                                System.out);
+                    } finally {
+                        shutdown();
+                    }
+                },
                 "researcher-terminal");
         thread.setDaemon(true);
         thread.start();
@@ -88,6 +104,16 @@ public class TerminalPromptRunner implements CommandLineRunner {
             awaiting = false;
         }
         return awaiting ? REPLY_PROMPT : READY_PROMPT;
+    }
+
+    /**
+     * Ends the application once the prompt loop is over: closing the context runs the shutdown hooks (the
+     * managed llama-server is stopped) and stops the embedded web server that would otherwise keep the JVM
+     * alive. {@code System.exit} then guarantees the process ends even if some library thread lingers.
+     */
+    private void shutdown() {
+        if (context == null) return;   // unit test driving loop() directly
+        System.exit(SpringApplication.exit(context));
     }
 
     /** Clears the "researching..." cue from the current line before the reply is printed. */
